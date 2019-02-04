@@ -1,0 +1,214 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates an S3 bucket configured for hosting a static website, CloudFront distribution, and wires up to Route53 DNS record
+Parameters:
+  DomainName:
+    Type: String
+    Description: The DNS name of an existing Amazon Route 53 hosted zone, without the www
+    AllowedPattern: "(?!-)[a-zA-Z0-9-.]{1,128}(?<!-)"
+    ConstraintDescription: must be a valid DNS zone name.
+    MaxLength: 128
+    MinLength: 1
+  DomainAcmCertificateArn:
+    Type: String
+    Description: The ARN name of an existing Amazon ACM certificate
+    AllowedPattern: "(?!-)[:/a-zA-Z0-9-.]{1,256}(?<!-)"
+    ConstraintDescription: must be a valid ARN for already created ACM certificate.
+    MaxLength: 256
+    MinLength: 1
+Mappings:
+  RegionMap:
+    us-east-1:
+      S3hostedzoneID: Z3AQBSTGFYJSTF
+      websiteendpoint: s3-website-us-east-1.amazonaws.com
+Resources:
+  LoggingBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub ${DomainName}-logs
+      AccessControl: "LogDeliveryWrite"
+      Tags:
+        -
+          Key: Name
+          Value: lyftoff-co
+        -
+          Key: Enviroment
+          Value: production
+    DeletionPolicy: Retain
+  WebsiteBucket:
+    Type: "AWS::S3::Bucket"
+    DependsOn: LoggingBucket
+    Properties:
+      BucketName: !Sub www.${DomainName}
+      AccessControl: "PublicRead"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+      Tags:
+        -
+          Key: Name
+          Value: lyftoff-co
+        -
+          Key: Enviroment
+          Value: production
+      LoggingConfiguration:
+        DestinationBucketName: !Sub ${DomainName}-logs
+        LogFilePrefix: "s3logs/"
+    DeletionPolicy: Retain
+  WebsiteBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket:
+        Ref: "WebsiteBucket"
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - "s3:GetObject"
+            Effect: "Allow"
+            Resource:
+              Fn::Join:
+                - ""
+                -
+                  - "arn:aws:s3:::"
+                  -
+                    Ref: "WebsiteBucket"
+                  - "/*"
+            Principal: "*"
+  WWWRedirectBucket:
+    Type: "AWS::S3::Bucket"
+    DependsOn: LoggingBucket
+    Properties:
+      BucketName: !Ref DomainName
+      AccessControl: "BucketOwnerFullControl"
+      WebsiteConfiguration:
+        RedirectAllRequestsTo:
+          HostName: !Sub www.${DomainName}
+      Tags:
+        -
+          Key: Name
+          Value: lyftoff-co
+        -
+          Key: Enviroment
+          Value: production
+  WebsiteCDN:
+    Type: "AWS::CloudFront::Distribution"
+    DependsOn: WebsiteBucket
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Sub www.${DomainName}
+        # CacheBehaviors:
+        #   AllowedMethods:
+        #     - String
+        #   CachedMethods:
+        #     - String
+        #   Compress: Boolean
+        #   DefaultTTL: 86400
+        #   # ForwardedValues:
+        #   #   ForwardedValues
+        #   MaxTTL: 31536000
+        #   MinTTL: 0
+        #   # PathPattern: "*"
+        #   # SmoothStreaming: Boolean
+        #   TargetOriginId: String
+        #   # TrustedSigners:
+        #   #   - String
+        #   ViewerProtocolPolicy: redirect-to-https
+        Comment: !Sub Distribution for ${DomainName}
+        CustomErrorResponses:
+          -
+            ErrorCachingMinTTL: 300
+            ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: "/404.html"
+          -
+            ErrorCachingMinTTL: 300
+            ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: "/404.html"
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - "HEAD"
+            - "GET"
+          CachedMethods:
+            - "HEAD"
+            - "GET"
+          Compress: true
+          DefaultTTL: 86400
+          ForwardedValues:
+            Cookies:
+              Forward: "None"
+            # Headers:
+              # - String
+            QueryString: false
+          MaxTTL: 31536000
+          MinTTL: 0
+          SmoothStreaming: false
+          TargetOriginId: !Sub S3-www.${DomainName}
+          # TrustedSigners:
+          #   - String
+          ViewerProtocolPolicy" : redirect-to-https
+        DefaultRootObject: index.html
+        Enabled: true
+        Logging:
+          Bucket: !Sub ${DomainName}-logs.s3.amazonaws.com
+          IncludeCookies: false
+          Prefix: "cloudfront/"
+        PriceClass: PriceClass_100
+        # Restrictions:
+        #   Restriction
+        ViewerCertificate:
+          AcmCertificateArn: !Ref DomainAcmCertificateArn
+          MinimumProtocolVersion: TLSv1
+          SslSupportMethod: sni-only
+        # WebACLId: String
+        Comment: !Sub Cloudfront distribution pointing to S3 bucket for ${DomainName}
+        Origins:
+        - DomainName: !Sub
+            - www.${DomainName}.${suffix}
+            - { suffix: !FindInMap [ RegionMap, !Ref "AWS::Region", "websiteendpoint" ] }
+          Id: !Sub S3-www.${DomainName}
+          OriginPath: ""
+          CustomOriginConfig:
+            HTTPPort: "80"
+            HTTPSPort: "443"
+            OriginProtocolPolicy: http-only
+            OriginSSLProtocols:
+              - TLSv1.2
+        Enabled: true
+        DefaultRootObject: index.html
+        Aliases:
+        - !Sub www.${DomainName}
+        # HttpVersion: "http2"
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - GET
+          - HEAD
+          Compress: true
+          TargetOriginId: !Sub S3-www.${DomainName}
+          ForwardedValues:
+            QueryString: false
+          ViewerProtocolPolicy: "redirect-to-https"
+  WebsiteDNSName:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub ${DomainName}.
+      RecordSets:
+      - Name: !Ref DomainName
+        Type: "A"
+        AliasTarget:
+          HostedZoneId: !FindInMap [ RegionMap, !Ref "AWS::Region", "S3hostedzoneID" ]
+          DNSName: !FindInMap [ RegionMap, !Ref "AWS::Region", "websiteendpoint" ]
+      - Name: !Sub www.${DomainName}
+        Type: "A"
+        AliasTarget:
+          HostedZoneId: "Z2FDTNDATAQYW2" #hosted zoneId of CloudFront
+          DNSName: !GetAtt WebsiteCDN.DomainName
+Outputs:
+  BucketName:
+    Value: !Ref WebsiteBucket
+    Description: Name of S3 bucket to hold website content
+  WebsiteURL:
+    Value: !Sub https://www.${DomainName}
+    Description: Website URL
